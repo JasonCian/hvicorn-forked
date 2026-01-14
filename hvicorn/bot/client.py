@@ -93,17 +93,19 @@ class Bot:
     - 插件系统支持
     """
 
-    def __init__(self, nick: str, channel: str, password: Optional[str] = None) -> None:
+    def __init__(self, nick: str, channel: str, password: Optional[str] = None, ws_address: Optional[str] = None) -> None:
         """初始化 Bot 实例
 
         Args:
             nick (str): 机器人的昵称（1-24 个字符，仅限字母数字和下划线）
             channel (str): 要加入的频道名称
             password (Optional[str], optional): 频道密码（如果需要）。默认为 None。
+            ws_address (Optional[str], optional): 自定义 WebSocket 服务器地址。默认为 None（使用 hack.chat 官方服务器）。
         """
         self.nick = nick  # 机器人昵称
         self.channel = channel  # 目标频道
         self.password = password  # 频道密码（可选）
+        self.ws_address = ws_address or WS_ADDRESS  # WebSocket 服务器地址
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None  # WebSocket 连接对象
         self.startup_functions: List[Callable] = []  # 启动时执行的函数列表
         # 事件处理函数字典，__GLOBAL__ 是特殊键，用于全局事件处理
@@ -363,9 +365,9 @@ class Bot:
         如果启用了 bypass_gfw_dns_poisoning 功能，
         会使用 IP 地址直连以绕过 GFW 的 DNS 污染（但可能存在安全风险）。
         """
-        debug(f"Connecting to {WS_ADDRESS}, Websocket options: {self.wsopt}")
+        debug(f"Connecting to {self.ws_address}, Websocket options: {self.wsopt}")
         if (
-            WS_ADDRESS == "wss://hack.chat/chat-ws"
+            self.ws_address == "wss://hack.chat/chat-ws"
             and self.optional_features.bypass_gfw_dns_poisoning
         ):
             # 启用 GFW 绕过模式：使用 IP 地址直连
@@ -388,7 +390,7 @@ class Bot:
             )
         else:
             # 正常连接模式
-            self.websocket = await websockets.connect(WS_ADDRESS, **self.wsopt)
+            self.websocket = await websockets.connect(self.ws_address, **self.wsopt)
         debug(f"Connected!")
 
     async def _run_events(
