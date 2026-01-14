@@ -1,3 +1,8 @@
+"""Chat 模块 - 聊天消息相关类
+
+包含 Message 类（可编辑消息）和 ChatRequest（发送消息请求）。
+"""
+
 from pydantic import BaseModel
 from typing import Optional, Literal
 from hvicorn.models.client.update_message import UpdateMessageRequest
@@ -6,42 +11,50 @@ from warnings import warn
 
 
 class Message:
-    """
-    A class representing an asynchronous message.
-
-    Attributes:
-        text (str): The content of the message.
-        customId (Optional[str]): A unique identifier for the message. If provided, the message is editable.
-        editable (bool): Indicates whether the message can be edited.
+    """异步消息类
+    
+    表示一条发送到 hack.chat 的消息。
+    如果在发送时指定了 customId，该消息就可以在发送后编辑。
+    
+    特性:
+        text (str): 消息内容
+        customId (Optional[str]): 唯一标识符，如果提供则消息可编辑
+        editable (bool): 消息是否可编辑
+        
+    编辑模式:
+        - overwrite: 完全替换消息内容
+        - prepend: 在消息开头插入文本
+        - append: 在消息末尾追加文本
+        - complete: 标记消息为完成，之后不可再编辑
     """
 
     def __init__(self, text: str, customId: Optional[str] = None) -> None:
-        """
-        Initialize an Message instance.
+        """初始化 Message 实例
 
         Args:
-            text (str): The content of the message.
-            customId (Optional[str], optional): A unique identifier for the message. Defaults to None.
+            text (str): 消息内容
+            customId (Optional[str], optional): 唯一标识符。默认为 None。
         """
         self.text = text
         self.customId = customId
-        self.editable = customId is not None
+        self.editable = customId is not None  # 有 customId 才可编辑
 
     def _generate_edit_request(
         self, mode: Literal["overwrite", "prepend", "append", "complete"], text: str
     ):
-        """
-        Generate an edit request for the message.
+        """生成消息编辑请求
+        
+        内部方法，用于创建 UpdateMessageRequest 对象。
 
         Args:
-            mode (Literal["overwrite", "prepend", "append", "complete"]): The edit mode.
-            text (str): The text to be used in the edit.
+            mode (Literal["overwrite", "prepend", "append", "complete"]): 编辑模式
+            text (str): 要用于编辑的文本
 
         Returns:
-            UpdateMessageRequest: An object representing the edit request.
+            UpdateMessageRequest: 表示编辑请求的对象
 
         Raises:
-            SyntaxError: If the message isn't editable or if customId is missing.
+            ValueError: 如果消息不可编辑或缺少 customId
         """
         if not self.editable:
             raise ValueError("This message isn't editable.")
@@ -52,56 +65,73 @@ class Message:
 
     async def _edit(
         self, mode: Literal["overwrite", "prepend", "append", "complete"], text: str
-    ) -> None: ...
+    ) -> None: 
+        """内部编辑方法
+        
+        此方法会在 Bot 类中被重写，用于实际发送编辑请求。
+        """
+        ...
 
     async def edit(self, text):
-        """
-        Asynchronously edit the message by overwriting its content.
+        """异步编辑消息（覆盖模式）
+        
+        完全替换消息内容。
 
         Args:
-            text (str): The new content for the message.
+            text (str): 新的消息内容
 
         Returns:
-            The result of the _edit method call.
+            编辑方法的返回结果
+            
+        示例:
+            msg = await bot.send_message("Hello", editable=True)
+            await msg.edit("Hi there!")
         """
         self.text = text
         return await self._edit("overwrite", text)
 
     async def prepend(self, text):
-        """
-        Asynchronously prepend text to the beginning of the message.
+        """异步在消息开头插入文本
 
         Args:
-            text (str): The text to prepend.
+            text (str): 要插入的文本
 
         Returns:
-            The result of the _edit method call.
+            编辑方法的返回结果
+            
+        示例:
+            msg = await bot.send_message("World", editable=True)
+            await msg.prepend("Hello ")  # 结果: "Hello World"
         """
         self.text = text + self.text
         return await self._edit("prepend", text)
 
     async def append(self, text):
-        """
-        Asynchronously append text to the end of the message.
+        """异步在消息末尾追加文本
 
         Args:
-            text (str): The text to append.
+            text (str): 要追加的文本
 
         Returns:
-            The result of the _edit method call.
+            编辑方法的返回结果
+            
+        示例:
+            msg = await bot.send_message("Hello", editable=True)
+            await msg.append(" World")  # 结果: "Hello World"
         """
         self.text += text
         return await self._edit("append", text)
 
     async def complete(self):
-        """
-        Asynchronously mark the message as complete, making it non-editable.
+        """异步标记消息为完成，使其不可再编辑
+        
+        调用此方法后，消息将不能再次被编辑。
 
         Returns:
-            UpdateMessageRequest: An object representing the completion request.
+            UpdateMessageRequest: 表示完成请求的对象
 
         Raises:
-            SyntaxError: If customId is missing.
+            SyntaxError: 如果缺少 customId
         """
         self.editable = False
         if not self.customId:
@@ -138,6 +168,15 @@ class Message:
 
 
 class ChatRequest(BaseModel):
+    """聊天消息请求模型
+    
+    表示发送到 hack.chat 频道的公开消息请求。
+    
+    属性:
+        cmd: 命令类型，始终为 "chat"
+        text: 要发送的消息文本
+        customId: 可选的唯一标识符，如果提供则消息可编辑
+    """
     cmd: Literal["chat"] = "chat"
     text: str
     customId: Optional[str] = None

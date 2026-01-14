@@ -1,3 +1,9 @@
+"""hvicorn Bot 核心模块
+
+这个模块包含了 hvicorn 框架的核心 Bot 类和相关功能。
+Bot 类负责管理 WebSocket 连接、事件处理、命令路由和用户状态跟踪。
+"""
+
 import asyncio
 import websockets
 import ssl
@@ -13,12 +19,15 @@ from hvicorn.bot.optional_features import OptionalFeatures
 from traceback import format_exc
 from logging import debug, warning
 
+# hack.chat 的 WebSocket 服务器地址
 WS_ADDRESS = "wss://hack.chat/chat-ws"
 
 
 class CommandContext:
-    """
-    Represents the context in which a command is executed.
+    """命令上下文类
+    
+    表示命令执行时的上下文环境，包含命令发送者、触发方式、参数等信息。
+    这个类会被传递给所有的命令处理函数，提供便捷的响应和查询方法。
     """
 
     def __init__(
@@ -30,91 +39,110 @@ class CommandContext:
         args: str,
         event: Union[WhisperPackage, ChatPackage],
     ) -> None:
-        """
-        Initialize a CommandContext instance.
+        """初始化命令上下文实例
 
         Args:
-            bot (Bot): The bot instance.
-            sender (User): The user who triggered the command.
-            triggered_via (Literal["chat", "whisper"]): The method by which the command was triggered.
-            text (str): The full text of the command.
-            args (str): The arguments passed to the command.
-            event (Union[WhisperPackage, ChatPackage]): The event that triggered the command.
+            bot (Bot): Bot 实例引用
+            sender (User): 触发命令的用户对象
+            triggered_via (Literal["chat", "whisper"]): 命令触发方式（公开聊天或私聊）
+            text (str): 完整的命令文本（包括命令前缀）
+            args (str): 命令参数（不包括命令前缀的部分）
+            event (Union[WhisperPackage, ChatPackage]): 触发命令的原始事件对象
         """
-        self.bot: "Bot" = bot
-        self.sender: User = sender
-        self.triggered_via: Literal["chat", "whisper"] = triggered_via
-        self.text: str = text
-        self.args: str = args
-        self.event: Union[WhisperPackage, ChatPackage] = event
+        self.bot: "Bot" = bot  # Bot 实例
+        self.sender: User = sender  # 命令发送者
+        self.triggered_via: Literal["chat", "whisper"] = triggered_via  # 触发方式
+        self.text: str = text  # 完整命令文本
+        self.args: str = args  # 命令参数
+        self.event: Union[WhisperPackage, ChatPackage] = event  # 原始事件
 
     async def respond(self, text, at_sender=True):
-        """
-        Respond to the command.
+        """响应命令
+        
+        根据命令的触发方式（公开聊天或私聊）自动选择合适的响应方式。
+        如果命令来自公开聊天，则在频道中回复；如果来自私聊，则私聊回复。
 
         Args:
-            text (str): The text to respond with.
-            at_sender (bool, optional): Whether to mention the sender in the response. Defaults to True.
+            text (str): 要响应的文本内容
+            at_sender (bool, optional): 是否在响应中 @ 提及发送者。默认为 True。
+                                       仅在公开聊天时有效，私聊时忽略此参数。
         """
         if self.triggered_via == "chat":
+            # 在公开频道中回复，可选择是否 @ 发送者
             await self.bot.send_message(
                 ("@" + self.sender.nick + " " if at_sender else "") + str(text)
             )
         elif self.triggered_via == "whisper":
+            # 通过私聊回复
             await self.bot.whisper(self.sender.nick, text)
         else:
             warning("Unknown trigger method, ignoring")
 
 
 class Bot:
-    """
-    Represents a hack.chat bot.
+    """hack.chat 机器人类
+    
+    这是 hvicorn 框架的核心类，负责管理与 hack.chat 服务器的连接、
+    事件处理、命令路由、用户状态跟踪等所有机器人功能。
+    
+    主要功能：
+    - WebSocket 连接管理
+    - 自动维护在线用户列表
+    - 事件分发系统（全局处理器和类型特定处理器）
+    - 命令注册和自动路由
+    - 插件系统支持
     """
 
     def __init__(self, nick: str, channel: str, password: Optional[str] = None) -> None:
-        """
-        Initialize a Bot instance.
+        """初始化 Bot 实例
 
         Args:
-            nick (str): The bot's nickname.
-            channel (str): The channel to join.
-            password (Optional[str], optional): The channel password. Defaults to None.
+            nick (str): 机器人的昵称（1-24 个字符，仅限字母数字和下划线）
+            channel (str): 要加入的频道名称
+            password (Optional[str], optional): 频道密码（如果需要）。默认为 None。
         """
-        self.nick = nick
-        self.channel = channel
-        self.password = password
-        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
-        self.startup_functions: List[Callable] = []
+        self.nick = nick  # 机器人昵称
+        self.channel = channel  # 目标频道
+        self.password = password  # 频道密码（可选）
+        self.websocket: Optional[websockets.WebSocketClientProtocol] = None  # WebSocket 连接对象
+        self.startup_functions: List[Callable] = []  # 启动时执行的函数列表
+        # 事件处理函数字典，__GLOBAL__ 是特殊键，用于全局事件处理
         self.event_functions: Dict[Any, List[Callable]] = {
-            "__GLOBAL__": [self._internal_handler]
+            "__GLOBAL__": [self._internal_handler]  # 内部处理器默认注册为全局处理器
         }
-        self.wsopt: Dict = {}
-        self.killed: bool = False
-        self.users: List[User] = []
-        self.commands: Dict[str, Callable] = {}
-        self.optional_features: OptionalFeatures = OptionalFeatures()
+        self.wsopt: Dict = {}  # WebSocket 连接选项
+        self.killed: bool = False  # 机器人是否已被终止的标志
+        self.users: List[User] = []  # 当前频道的在线用户列表（自动维护）
+        self.commands: Dict[str, Callable] = {}  # 命令前缀到处理函数的映射
+        self.optional_features: OptionalFeatures = OptionalFeatures()  # 可选功能配置
 
     async def _send_model(self, model: BaseModel) -> None:
-        """
-        Send a model to the websocket.
+        """发送 Pydantic 模型到 WebSocket
+        
+        将 Pydantic 模型序列化为 JSON 并通过 WebSocket 发送到服务器。
+        自动过滤 None 值字段，CustomRequest 类型会直接使用原始 JSON。
 
         Args:
-            model (BaseModel): The model to send.
+            model (BaseModel): 要发送的 Pydantic 模型对象
         """
         if type(model) == CustomRequest:
+            # CustomRequest 特殊处理：直接使用原始 JSON（绕过 Pydantic 验证）
             payload = model.rawjson
         else:
             try:
+                # 将 Pydantic 模型转换为字典
                 data = model.model_dump()
             except:
                 warning(f"Cannot stringify model, ignoring: {model}")
                 return
+            # 过滤掉值为 None 的字段，减少传输数据量
             payload = {}
             for k, v in data.items():
                 if v != None:
                     payload.update({k: v})
         if self.websocket:
             debug(f"Sent payload: {payload}")
+            # 将字典序列化为 JSON 字符串并发送
             await self.websocket.send(dumps(payload))
         else:
             warning(f"Websocket isn't open, ignoring: {model}")
@@ -134,22 +162,44 @@ class Bot:
         ],
         matches: Union[str, Callable],
     ) -> List[User]:
-        """
-        Get users by a specific attribute or custom function.
+        """根据指定属性或自定义函数获取用户列表
+        
+        支持两种查询方式：
+        1. 属性匹配：根据用户对象的具体属性（如昵称、等级等）进行精确匹配
+        2. 函数过滤：使用自定义函数对每个用户进行判断
 
         Args:
-            by (Literal): The attribute to match by.
-            matches (Union[str, Callable]): The value to match or a custom function.
+            by (Literal): 查询依据，可以是用户属性名或 "function"
+                - "nick": 昵称
+                - "hash": 用户哈希值
+                - "trip": 识别码
+                - "color": 颜色
+                - "isBot": 是否为机器人
+                - "level": 等级
+                - "uType": 用户类型（user/mod/admin）
+                - "userid": 用户 ID
+                - "function": 使用自定义函数过滤
+            matches (Union[str, Callable]): 匹配值或过滤函数
+                - 当 by != "function" 时：要匹配的具体值
+                - 当 by == "function" 时：接受 User 对象返回 bool 的函数
 
         Returns:
-            List[User]: A list of matching users.
+            List[User]: 匹配的用户对象列表
+            
+        示例:
+            # 获取所有管理员
+            admins = bot.get_users_by("uType", "admin")
+            # 使用自定义函数获取高等级用户
+            vips = bot.get_users_by("function", lambda u: u.level >= 100)
         """
         results = []
         for user in self.users:
             if by != "function":
+                # 属性精确匹配
                 if user.__dict__.get(by) == matches:
                     results.append(user)
             else:
+                # 使用自定义函数过滤
                 if callable(matches):
                     if matches(user):
                         results.append(user)
@@ -198,14 +248,23 @@ class Bot:
         return self.get_user_by("nick", nick)
 
     async def _internal_handler(self, event: BaseModel) -> None:
-        """
-        Internal event handler for processing various types of events.
+        """内部事件处理器
+        
+        这是框架的核心处理器，负责维护机器人的内部状态。
+        主要处理以下任务：
+        1. 用户列表同步（OnlineSet/Add/Remove）
+        2. 命令路由（从 Chat/Whisper 事件中提取并执行命令）
+        3. 用户信息更新（UpdateUser 事件）
+        
+        此处理器自动注册为全局事件处理器，会接收所有事件。
 
         Args:
-            event (BaseModel): The event to process.
+            event (BaseModel): 要处理的事件对象
         """
+        # 处理在线用户列表设置事件（首次加入频道或刷新）
         if isinstance(event, OnlineSetPackage):
-            self.users = event.users
+            self.users = event.users  # 完整替换用户列表
+        # 处理新用户加入事件
         elif isinstance(event, OnlineAddPackage):
             self.users.append(
                 User(
@@ -221,29 +280,35 @@ class Bot:
                     userid=event.userid,
                 )
             )
+        # 处理用户离开事件
         elif isinstance(event, OnlineRemovePackage):
             user = self.get_user_by_nick(event.nick)
             if user:
-                self.users.remove(user)
+                self.users.remove(user)  # 从列表中移除该用户
+        # 处理公开聊天消息中的命令
         if isinstance(event, ChatPackage):
             for command in self.commands.items():
+                # 检查消息是否以命令前缀开头（前缀+空格）或完全匹配前缀
                 if event.text.startswith(command[0] + " ") or event.text == command[0]:
                     try:
+                        # 从用户列表中查找发送者
                         user = self.get_user_by_nick(event.nick)
                         if not user:
                             raise RuntimeError("User not found")
+                        # 创建命令上下文并调用处理函数
                         await command[1](
                             CommandContext(
                                 self,
                                 user,
-                                "chat",
-                                event.text,
+                                "chat",  # 触发方式：公开聊天
+                                event.text,  # 完整消息文本
                                 (
+                                    # 提取命令参数（去除前缀后的部分）
                                     event.text.split(" ", 1)[1]
                                     if event.text != command[0]
-                                    else ""
+                                    else ""  # 如果只有前缀，参数为空字符串
                                 ),
-                                event,
+                                event,  # 原始事件对象
                             )
                         )
                     except:
@@ -274,92 +339,122 @@ class Bot:
                         )
                     except:
                         warning(f"Ignoring exception in command: \n{format_exc()}")
+        # 处理用户信息更新事件
         if isinstance(event, UpdateUserPackage):
             if not event.nick:
                 return
+            # 找到要更新的用户对象
             target_user = self.get_user_by_nick(event.nick)
+            # 遍历更新包中的所有字段
             for k, v in event.model_dump().items():
                 if (
-                    k in dir(target_user)
-                    and v != None
-                    and v != target_user.__getattribute__(k)
+                    k in dir(target_user)  # 字段存在于用户对象中
+                    and v != None  # 新值不为空
+                    and v != target_user.__getattribute__(k)  # 值发生了变化
                 ):
+                    # 更新用户对象的对应属性
                     target_user.__setattr__(k, v)
 
     async def _connect(self) -> None:
-        """
-        Connect to the websocket server.
+        """连接到 WebSocket 服务器
+        
+        建立与 hack.chat 服务器的 WebSocket 连接。
+        如果启用了 bypass_gfw_dns_poisoning 功能，
+        会使用 IP 地址直连以绕过 GFW 的 DNS 污染（但可能存在安全风险）。
         """
         debug(f"Connecting to {WS_ADDRESS}, Websocket options: {self.wsopt}")
         if (
             WS_ADDRESS == "wss://hack.chat/chat-ws"
             and self.optional_features.bypass_gfw_dns_poisoning
         ):
+            # 启用 GFW 绕过模式：使用 IP 地址直连
             debug(
                 f"Connecting to wss://104.131.138.176/chat-ws instead of wss://hack.chat/chat-ws to bypass GFW DNS poisoning"
             )
             warning(
                 f"Enabling bypass_gfw_dns_poisoning can bypass GFW's DNS poisoning, but this can cause man-in-the-middle attacks."
             )
+            # 创建不验证证书的 SSL 上下文（存在安全风险）
             insecure_ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             insecure_ssl_context.check_hostname = False
             insecure_ssl_context.verify_mode = ssl.CERT_NONE
+            # 使用 IP 地址但保留域名的 SNI
             self.websocket = await websockets.connect(
                 "wss://hack.chat/chat-ws",
-                host="104.131.138.176",
+                host="104.131.138.176",  # 直接连接到 IP
                 ssl=insecure_ssl_context,
                 **self.wsopt,
             )
         else:
+            # 正常连接模式
             self.websocket = await websockets.connect(WS_ADDRESS, **self.wsopt)
         debug(f"Connected!")
 
     async def _run_events(
         self, event_type: Any, args: list, taskgroup: asyncio.TaskGroup
     ):
-        """
-        Run event handlers for a specific event type.
+        """运行特定类型的事件处理器
+        
+        从注册的处理器中找到对应类型的处理函数并执行。
+        支持同步和异步处理函数，异步函数会以 Task 形式并发执行。
 
         Args:
-            event_type (Any): The type of event to run handlers for.
-            args (list): Arguments to pass to the event handlers.
+            event_type (Any): 事件类型（如 ChatPackage）或 "__GLOBAL__"
+            args (list): 要传递给处理函数的参数列表
+            taskgroup (asyncio.TaskGroup): 用于管理并发任务的任务组
         """
         for function in self.event_functions.get(event_type, []):
             try:
                 if asyncio.iscoroutinefunction(function):
+                    # 异步函数：创建任务并发执行
                     taskgroup.create_task(function(*args))
                 else:
+                    # 同步函数：直接调用
                     function(*args)
             except:
                 warning(f"Ignoring exception in event: \n{format_exc()}")
 
     async def join(self) -> None:
-        """
-        Join the specified channel.
+        """加入指定的频道
+        
+        发送 join 请求包到服务器，将机器人加入到目标频道。
+        如果频道设有密码，会自动带上密码。
         """
         debug(f"Sending join package")
         await self._send_model(
             JoinRequest(nick=self.nick, channel=self.channel, password=self.password)
         )
-        await asyncio.sleep(1)
+        await asyncio.sleep(1)  # 等待 1 秒让服务器处理
         debug(f"Done!")
 
     async def send_message(self, text, editable=False) -> Message:
-        """
-        Send a message to the channel.
+        """发送消息到频道
+        
+        在当前频道发送一条公开消息。
+        如果设置 editable=True，会生成 customId，使消息可编辑。
 
         Args:
-            text (str): The message text.
-            editable (bool, optional): Whether the message should be editable. Defaults to False.
+            text (str): 要发送的消息文本
+            editable (bool, optional): 是否使消息可编辑。默认为 False。
 
         Returns:
-            Message: The sent message object.
+            Message: 消息对象，如果 editable=True，可以通过 msg._edit() 编辑
+            
+        示例:
+            # 普通消息
+            await bot.send_message("Hello, world!")
+            # 可编辑消息
+            msg = await bot.send_message("Loading...", editable=True)
+            await msg._edit("overwrite", "Done!")
         """
+        # 如果需要可编辑，生成唯一 ID
         customId = generate_customid() if editable else None
         await self._send_model(ChatRequest(text=text, customId=customId))
 
+        # 创建消息对象
         msg = Message(text, customId)
 
+        # 为消息对象添加 _edit 方法
         async def wrapper(*args, **kwargs):
             await self._send_model(msg._generate_edit_request(*args, **kwargs))
 
@@ -367,47 +462,62 @@ class Bot:
         return msg
 
     async def whisper(self, nick: str, text: str) -> None:
-        """
-        Send a whisper (private message) to a user.
+        """发送私聊消息
+        
+        向指定用户发送私聊（只有对方和自己可见）。
 
         Args:
-            nick (str): The nickname of the recipient.
-            text (str): The message text.
+            nick (str): 接收者的昵称
+            text (str): 私聊内容
         """
         await self._send_model(WhisperRequest(nick=nick, text=text))
 
     async def emote(self, text: str) -> None:
-        """
-        Send an emote message to the channel.
+        """发送动作消息
+        
+        发送一条动作消息（类似 IRC 的 /me 命令）。
+        在页面上会显示为斜体格式，如：*BotName does something*
 
         Args:
-            text (str): The emote text.
+            text (str): 动作文本
+            
+        示例:
+            await bot.emote("挥手问好")
+            # 显示为: *BotName 挥手问好*
         """
         await self._send_model(EmoteRequest(text=text))
 
     async def change_color(self, color: str = "reset") -> None:
-        """
-        Change the bot's color.
+        """更改机器人的颜色
+        
+        设置机器人昵称显示的颜色。可以使用颜色名或十六进制颜色代码。
 
         Args:
-            color (str, optional): The new color. Defaults to "reset".
+            color (str, optional): 新颜色。默认为 "reset" （重置为默认颜色）。
+                                   支持颜色名（如 "red"、"blue"）或 hex 值（如 "#FF5733"）
         """
         await self._send_model(ChangeColorRequest(color=color))
 
     async def change_nick(self, nick: str) -> None:
-        """
-        Change the bot's nickname.
+        """更改机器人的昵称
+        
+        修改机器人在频道中显示的昵称。
+        昵称必须符合 hack.chat 的命名规则：1-24 个字符，仅包含字母、数字和下划线。
 
         Args:
-            nick (str): The new nickname.
+            nick (str): 新昵称
 
         Raises:
-            ValueError: If the nickname is invalid.
+            ValueError: 如果昵称不符合命名规则
+            
+        注意:
+            - 更改成功后，self.nick 会自动更新
+            - 频道中会显示 "OldNick is now NewNick"
         """
         if not verifyNick(nick):
             raise ValueError("Invalid Nickname")
         await self._send_model(ChangeNickRequest(nick=nick))
-        self.nick = nick
+        self.nick = nick  # 更新内部记录的昵称
 
     async def invite(self, nick: str, channel: Optional[str] = None) -> None:
         """
@@ -428,24 +538,41 @@ class Bot:
     def on(
         self, event_type: Optional[Any] = None
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """
-        Decorator for registering event handlers.
+        """事件处理器装饰器
+        
+        用于注册事件处理函数的装饰器。
+        可以指定特定事件类型，或不指定以注册为全局处理器。
 
         Args:
-            event_type (Optional[Any], optional): The type of event to handle. Defaults to None.
+            event_type (Optional[Any], optional): 要处理的事件类型（如 ChatPackage）。
+                                                  如为 None，则注册为全局处理器。
+                                                  默认为 None。
 
         Returns:
-            Callable[[Callable[..., Any]], Callable[..., Any]]: A decorator function.
+            Callable: 装饰器函数
+            
+        示例:
+            # 处理特定类型的事件
+            @bot.on(hvicorn.ChatPackage)
+            async def on_chat(event: hvicorn.ChatPackage):
+                print(f"{event.nick}: {event.text}")
+            
+            # 全局处理器（接收所有事件）
+            @bot.on()
+            async def on_any_event(event):
+                print(f"Event: {type(event)}")
         """
 
         def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
             nonlocal event_type
             if event_type is None:
-                event_type = "__GLOBAL__"
+                event_type = "__GLOBAL__"  # 未指定类型，注册为全局处理器
             if event_type in self.event_functions.keys():
+                # 追加到现有处理器列表
                 self.event_functions[event_type].append(func)
                 debug(f"Added handler for {event_type}: {func}")
             else:
+                # 创建新的处理器列表
                 self.event_functions[event_type] = [func]
                 debug(f"Set handler for {event_type} to {func}")
             return func
@@ -453,11 +580,19 @@ class Bot:
         return wrapper
 
     def startup(self, function: Callable) -> None:
-        """
-        Register a startup function.
+        """注册启动函数
+        
+        注册一个在机器人启动时执行的函数。
+        这些函数会在加入频道后、开始接收事件前执行。
 
         Args:
-            function (Callable): The function to run at startup.
+            function (Callable): 要在启动时运行的函数（支持同步和异步）
+            
+        示例:
+            @bot.startup
+            async def on_start():
+                print("机器人已启动！")
+                await bot.send_message("大家好！")
         """
         self.startup_functions.append(function)
         debug(f"Added startup function: {function}")
@@ -466,18 +601,32 @@ class Bot:
     def command(
         self, prefix: str
     ) -> Callable[[Callable[[CommandContext], Any]], Callable[[CommandContext], Any]]:
-        """
-        Decorator for registering command handlers.
+        """命令处理器装饰器
+        
+        用于注册命令处理函数的装饰器。
+        当用户发送的消息以指定前缀开头时，会触发对应的处理函数。
 
         Args:
-            prefix (str): The command prefix.
+            prefix (str): 命令前缀（如 "/ping"、"!help" 等）
 
         Returns:
-            Callable[[Callable[[CommandContext], Any]], Callable[[CommandContext], Any]]: A decorator function.
+            Callable: 装饰器函数
+            
+        注意:
+            - 使用装饰器时，处理函数 **必须** 是异步的 (async def)
+            - 如果需要同步函数，请使用 register_command() 方法
+            
+        示例:
+            @bot.command("/ping")
+            async def pong(ctx: hvicorn.CommandContext):
+                await ctx.respond("Pong!")
+            
+            # 用户发送 "/ping" 或 "/ping hello" 都会触发此命令
         """
 
         def wrapper(func: Callable[[CommandContext], Any]):
             if prefix in self.commands.keys():
+                # 警告：覆盖现有命令
                 warning(
                     f"Overriding function {self.commands[prefix]} for command prefix {prefix}"
                 )
